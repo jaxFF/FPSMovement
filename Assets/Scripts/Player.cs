@@ -8,15 +8,15 @@ public class Player : MonoBehaviour
     private CharacterController CharacterController;
 
     private GameMovement GameMovement = new GameMovement();
-    private GameMovementState GameMovementState = new GameMovementState();
 
     public InputAction MoveAction;
     public InputAction LookAction;
     public InputAction FireAction;
 
+    UserCmd OutCommand = new UserCmd();
+
     void Start() {
-        this.CharacterController = GetComponent<CharacterController>();
-        this.GameMovementState.CharacterController = CharacterController;
+        CharacterController = GetComponent<CharacterController>();
 
         MoveAction.Enable();
         LookAction.Enable();
@@ -27,41 +27,62 @@ public class Player : MonoBehaviour
         if (Cursor.lockState != CursorLockMode.Locked) {
             Cursor.lockState = CursorLockMode.Locked;
         }
-        
-        // note(jax): Camera code should be calculated in Update()
-        // Things go wrong in FixedUpdate() (slower camera sensitivity??)
 
         Vector2 InputVector = LookAction.ReadValue<Vector2>();
-        Vector2 LookVector = new Vector3();
         // 0.022f is m_yaw value from Source
-        LookVector.x += -InputVector.y * 0.022f * 2;
-        LookVector.y += InputVector.x * 0.022f * 2;
+        OutCommand.MouseDX -= (InputVector.y * 0.022f) * 2.14f;
+        OutCommand.MouseDY += (InputVector.x * 0.022f) * 2.14f;
 
-        // Clamp the LookVector X
-        if (LookVector.x < -90)
-            LookVector.x = -90;
-        else if (LookVector.x > 90)
-            LookVector.x = 90;
+        // Clamp the LookVector
+        if (OutCommand.MouseDX < -90)
+            OutCommand.MouseDX = -90;
+        else if (OutCommand.MouseDX > 90)
+            OutCommand.MouseDX = 90;
 
-        this.UpdateViewAngles(LookVector);
+        if (OutCommand.MouseDY < 0.0f)
+            OutCommand.MouseDY = 360.0f;
+        else if (OutCommand.MouseDY > 360.0f)
+            OutCommand.MouseDY = 0.0f;
+
+        Debug.Log("{" + OutCommand.MouseDX + ", " + OutCommand.MouseDY + "}, " + MoveAction.ReadValue<Vector2>());
+
+        UpdateViewAngles();
     }
 
     void FixedUpdate() {
         Vector2 MoveVector = MoveAction.ReadValue<Vector2>();
 
-        UserCmd Command = new UserCmd();
-        Command.ViewAngles = Camera.main.transform.rotation;
+        OutCommand.ViewAngles = Camera.main.transform.rotation;
+        OutCommand.Buttons = GetButtons();
 
-        Command.ForwardMove = MoveVector.y; // MoveVector.y is W / S
-        Command.SideMove = MoveVector.x; // MoveVector.x is A / D
+        OutCommand.ForwardMove = MoveVector.y; // MoveVector.y is W / S
+        OutCommand.SideMove = MoveVector.x; // MoveVector.x is A / D
 
-        GameMovement.ProcessMovement(GameMovementState, Command);
+        GameMovement.ProcessMovement(CharacterController, OutCommand);
     }
 
-    private void UpdateViewAngles(Vector2 ViewAngles) {
+    private int GetButtons() {
+        int Buttons = 0;
+
+        if (Keyboard.current.spaceKey.isPressed || Input.mouseScrollDelta.x != 0.0f || Input.mouseScrollDelta.y != 0.0f) {
+            Buttons |= UserCmd.INPUT_SPACE;
+        }
+
+        if (Keyboard.current.leftShiftKey.isPressed) {
+            Buttons |= UserCmd.INPUT_WALK;
+        }
+
+        if (Keyboard.current.leftCtrlKey.isPressed) {
+            Buttons |= UserCmd.INPUT_CTRL;
+        }
+
+        return Buttons;
+    }
+
+    private void UpdateViewAngles() {
         // note(jax): Rotate the collider THEN the camera
-        this.transform.rotation *= Quaternion.Euler(0.0f, ViewAngles.y, 0.0f);
-        Camera.main.transform.rotation *= Quaternion.Euler(ViewAngles.x, 0.0f, 0.0f);
+        this.transform.rotation = Quaternion.Euler(0.0f, OutCommand.MouseDY, 0.0f);
+        Camera.main.transform.rotation = Quaternion.Euler(OutCommand.MouseDX, OutCommand.MouseDY, 0.0f);
     }
 
     private void OnGUI() {

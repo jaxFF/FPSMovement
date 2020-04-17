@@ -18,14 +18,19 @@ using UnityEngine;
 
 [SerializeField]
 public class GameMovementSettings {
-    public float Gravity = 800.0f; // Source World gravity
+    public static float UnitConversionScale = 0.03f;
+
+    public float Gravity = 800.0f * UnitConversionScale; // Source World gravity
     public float Accelerate = 5.5f; // CSGO Acceleration speed
+    public float AirAccelerate = 12.0f; // CSGO Acceleration speed
     public float Friction = 5.2f; // CSGO World friction
 
-    public float StopSpeed = 80.0f; // CSGO Stop speed
+    public float StopSpeed = 80.0f * UnitConversionScale; // CSGO Stop speed
+    public float JumpHeight = 21.0f;
+    public float JumpImpulse = 21.0f * UnitConversionScale;//301.993377f * UnitConversionScale;
 
-    public float MaxVelocity = 3500.0f;
-    public float MaxSpeed = 400.0f; // 320.0f
+    public float MaxVelocity = 3500.0f * UnitConversionScale;
+    public float MaxSpeed = 400.0f * UnitConversionScale; // 320.0f
 }
 
 public class GameMovementState {
@@ -33,6 +38,7 @@ public class GameMovementState {
 
     public Vector3 VelocityVector;
     public Quaternion ViewAngles;
+    public int OldButtons;
 
     public bool OnGround;
     public float SurfaceFriction = 1.0f;
@@ -43,7 +49,7 @@ public class GameMovementState {
 
 public class GameMovement : MonoBehaviour {
     private GameMovementSettings Settings = new GameMovementSettings();
-    private GameMovementState State;
+    private GameMovementState State = new GameMovementState();
     private UserCmd Command;
 
     private Vector3 ForwardVector; 
@@ -57,56 +63,118 @@ public class GameMovement : MonoBehaviour {
         GUIStyle.fontSize = 14;
     }
 
-    public void ProcessMovement(GameMovementState State, UserCmd Command) {
-        this.State = State;
-        this.Command = Command;
+    public void ProcessMovement(CharacterController Controller, UserCmd CommandIn) {
+        State.CharacterController = Controller;
+        Command = CommandIn;
 
-        this.PlayerMove();
+        PlayerMove();
 
         Debug.Log("ViewAngles: " + Command.ViewAngles + ", Forward: " + Command.ForwardMove + ", Side: " + Command.SideMove);
     }
 
     public void PlayerMove() {
-        this.State.OutWishVelocity = Vector3.zero;
-        this.State.OutJumpVelocity = Vector3.zero;
+        State.OutWishVelocity = Vector3.zero;
+        State.OutJumpVelocity = Vector3.zero;
 
-        this.ForwardVector = Command.ViewAngles * Vector3.forward;
-        this.RightVector = Command.ViewAngles * Vector3.right;
-        this.UpVector = Command.ViewAngles * Vector3.up;
+        this.ForwardVector = this.Command.ViewAngles * Vector3.forward;
+        this.RightVector = this.Command.ViewAngles * Vector3.right;
+        this.UpVector = this.Command.ViewAngles * Vector3.up;
 
-        // todo(jax): Make this based on State.CharacterController.isGrounded;
-        // That way we can interface with Unitys collision system! x)
-        this.State.OnGround = true; 
+        FullWalkMove();
+        FinishPlayerMove();
+    }
 
-        this.FullWalkMove();
+    public bool CheckJumpButton() {
+        // todo (jax): Consider CSGO Stamina recovery
+        // https://github.com/click4dylan/CSGO_GameMovement_Reversed/blob/master/IGameMovement.cpp#L2427
+        // https://github.com/click4dylan/CSGO_GameMovement_Reversed/blob/master/IGameMovement.cpp#L2055
+        if (!State.CharacterController.isGrounded) {
+            State.OldButtons |= UserCmd.INPUT_SPACE;
+            return false;
+        }
+
+        if ((State.OldButtons &= UserCmd.INPUT_SPACE) == UserCmd.INPUT_SPACE) {
+            return false;
+        }
+
+        // In the air now
+        State.OnGround = false;
+
+        if (State.OnGround) {
+            State.SurfaceFriction = 1.0f;
+        }
+
+        float GroundFactor = 1.0f;
+        float JumpMultiplier = Mathf.Sqrt(2.0f * Settings.Gravity * Settings.JumpImpulse);
+
+        float InitalY = State.VelocityVector.y;
+        State.VelocityVector.y += (GroundFactor * JumpMultiplier);
+
+        FinishGravity();
+
+        State.OutJumpVelocity.y += State.VelocityVector.y - InitalY;
+        State.OldButtons |= UserCmd.INPUT_SPACE;
+        return true;
     }
 
     public void FullWalkMove() {
-        this.StartGravity();
-        this.CheckVelocity();
+        // note(jax): Friction actually isn't being calculated because
+        // Friction acts on State.OutWishVelocity, not State.VelocityVector
 
-        if (this.State.OnGround) {
-            this.State.VelocityVector.y = 0.0f;
-            this.Friction();
-        }
+        // todo(jax): Handle UserCmd.INPUT_SPACE, UserCmd.INPUT_WALK, UserCmd.INPUT_CTRL
+        StartGravity();
 
-        if (this.State.OnGround) {
-            this.WalkMove();
+        // note(jax): Calculate Jump
+        if ((Command.Buttons & UserCmd.INPUT_SPACE) == UserCmd.INPUT_SPACE) {
+            CheckJumpButton();
         } else {
-            // AirMove()
+            State.OldButtons &= ~UserCmd.INPUT_SPACE;
         }
 
-        this.CheckVelocity();
-        this.FinishGravity();
+        if (State.OnGround) {
+            State.VelocityVector.y = 0.0f;
+            Friction();
+        }
 
-        if (this.State.OnGround) {
-            this.State.VelocityVector.y = 0.0f;
+        CheckVelocity();
+
+        if (State.OnGround)
+            WalkMove();
+        else
+            AirMove();
+
+        CategorizePosition();
+
+        CheckVelocity();
+
+        FinishGravity();
+
+        Vector3 Temp = GetOrigin();
+        Temp += State.VelocityVector * Time.fixedDeltaTime;
+        if (State.OnGround) {
+            float Gravity = 1.0f;
+
+            Vector3 NewOrigin = ScaleOriginReverse(Temp - GetOrigin());
+            NewOrigin.y -= ((Gravity * this.Settings.Gravity * 10.0f * Time.fixedDeltaTime) * Time.fixedDeltaTime) * GameMovementSettings.UnitConversionScale;
+            State.CharacterController.Move(NewOrigin);
+        } else {
+            State.CharacterController.Move(ScaleOriginReverse(Temp - GetOrigin()));
         }
     }
 
+    public void CategorizePosition() {
+        State.OnGround = State.CharacterController.isGrounded;
+        if (State.OnGround)
+            State.SurfaceFriction = 1.0f;
+    }
+
+    public void FinishPlayerMove() {
+        State.OldButtons = Command.Buttons;
+    }
+
     public void WalkMove() {
-        float ForwardMove = this.Command.ForwardMove;
-        float RightMove = this.Command.SideMove;
+        float ForwardMove = Command.ForwardMove;
+        float SideMove = Command.SideMove;
 
         ForwardVector.y = 0.0f;
         RightVector.y = 0.0f;
@@ -114,123 +182,167 @@ public class GameMovement : MonoBehaviour {
         RightVector.Normalize();
 
         Vector3 WishVelocity = Vector3.zero;
-        WishVelocity.x = (ForwardVector.x * ForwardMove) + (RightVector.x * RightMove);
-        WishVelocity.z = (ForwardVector.z * ForwardMove) + (RightVector.z * RightMove);
+        WishVelocity.x = (ForwardVector.x * ForwardMove) + (RightVector.x * SideMove);
+        WishVelocity.z = (ForwardVector.z * ForwardMove) + (RightVector.z * SideMove);
 
         Vector3 WishDirection = WishVelocity;
-        WishDirection.Normalize();
         float WishSpeed = WishDirection.magnitude;
+        WishDirection.Normalize();
 
         // Clamp the WishSpeed
-        if (WishSpeed != 0.0f && WishSpeed > this.Settings.MaxSpeed) {
-            for (int i = 0; i < 3; ++i) {
-                WishVelocity[i] *= this.Settings.MaxSpeed / WishSpeed;
-            }
+        if (WishSpeed != 0.0f && WishSpeed > Settings.MaxSpeed) {
+            for (int i = 0; i < 3; ++i)
+                WishVelocity[i] *= (Settings.MaxSpeed / WishSpeed);
 
-            WishSpeed = this.Settings.MaxSpeed;
+            WishSpeed = Settings.MaxSpeed;
         }
 
         this.State.VelocityVector.y = 0.0f;
-        this.Accelerate(WishDirection, WishSpeed, this.Settings.Accelerate);
+        this.Accelerate(WishDirection, WishSpeed, Settings.Accelerate);
         this.State.VelocityVector.y = 0.0f;
 
-        this.State.CharacterController.Move(this.State.VelocityVector);
+        if (State.VelocityVector.sqrMagnitude > (Settings.MaxSpeed * Settings.MaxSpeed)) {
+            float Scale = Settings.MaxSpeed / State.VelocityVector.magnitude;
+            State.VelocityVector *= Scale;
+        }
+
+        State.OutWishVelocity += WishDirection * WishSpeed;
+    }
+
+    public void AirMove() {
+        float ForwardMove = Command.ForwardMove;
+        float SideMove = Command.SideMove;
+
+        ForwardVector.y = 0.0f;
+        RightVector.y = 0.0f;
+        ForwardVector.Normalize();
+        RightVector.Normalize();
+
+        Vector3 WishVelocity = Vector3.zero;
+        WishVelocity.x = (ForwardVector.x * ForwardMove) + (RightVector.x * SideMove);
+        WishVelocity.z = (ForwardVector.z * ForwardMove) + (RightVector.z * SideMove);
+
+        Vector3 WishDirection = WishVelocity;
+        float WishSpeed = WishDirection.magnitude;
+        WishDirection.Normalize();
+
+        // Clamp the WishSpeed
+        if (WishSpeed != 0.0f && WishSpeed > Settings.MaxSpeed) {
+            for (int i = 0; i < 3; ++i)
+                WishVelocity[i] *= Settings.MaxSpeed / WishSpeed;
+
+            WishSpeed = Settings.MaxSpeed;
+        }
+
+        AirAccelerate(WishDirection, WishSpeed, Settings.AirAccelerate);
     }
 
     public void Friction() {
-        float NewSpeed, Friction, Control;
+        float Speed = State.VelocityVector.magnitude;
 
-        float Speed = this.State.VelocityVector.magnitude;
-        if (Speed < 0.1f) {
-            return;
-        }
+        if (Speed >= 0.1f) {
+            float Drop = 0.0f;
+            if (State.OnGround) {
+                float Friction = Settings.Friction * State.SurfaceFriction;
 
-        float Drop = 0;
-        if (this.State.OnGround) {
-            Friction = this.Settings.Friction * this.State.SurfaceFriction;
+                // Bleed off some speed, but if we have less than the bleed
+                //  threshold, bleed the threshold amount.
+                float Control = (Speed < Settings.StopSpeed) ? Settings.StopSpeed : Speed;
 
-            // Bleed off some speed, but if we have less than the bleed
-            //  threshold, bleed the threshold amount.
-            Control = (Speed < this.Settings.StopSpeed) ? this.Settings.StopSpeed : Speed;
+                Drop += (Control * Friction) * Time.fixedDeltaTime;
+            }
 
-            Drop += Control * Friction * Time.fixedDeltaTime;
-        }
+            float NewSpeed = Mathf.Max(Speed - Drop, 0.0f);
+            if (NewSpeed < 0)
+                NewSpeed = 0;
 
-        NewSpeed = Speed - Drop;
-        if (NewSpeed < 0)
-            NewSpeed = 0;
+            if (NewSpeed != Speed) {
+                // Determine proportion of old speed we are using.
+                NewSpeed /= Speed;
 
-        if (NewSpeed != Speed) {
-            // Determine proportion of old speed we are using.
-            NewSpeed /= Speed;
-
-            for (int i = 0; i < 3; ++i) {
-                this.State.VelocityVector[i] *= NewSpeed;
+                for (int i = 0; i < 3; ++i)
+                    State.VelocityVector[i] *= NewSpeed;
             }
         }
-
-        this.State.OutWishVelocity -= (1.0f - NewSpeed) * this.State.VelocityVector;
     }
 
     public void Accelerate(Vector3 WishDirection, float WishSpeed, float Accelerate) {
-        // See if we are changing direction a bit
-        float CurrentSpeed = Vector3.Dot(this.State.VelocityVector, WishDirection);
+        float AddSpeed = WishSpeed - Vector3.Dot(State.VelocityVector, WishDirection);
 
-        // Reduce wishspeed by the amount of veer.
-        float AddSpeed = WishSpeed - CurrentSpeed;
-        if (AddSpeed <= 0)
-            return;
+        if (AddSpeed > 0.0f) {
+            float AccelSpeed = Accelerate * Time.fixedDeltaTime * WishSpeed;
 
-        float AccelSpeed = Accelerate * Time.fixedDeltaTime * WishSpeed * this.State.SurfaceFriction;
-        if (AccelSpeed > AddSpeed) {
-            AccelSpeed = AddSpeed;
+            if (AccelSpeed > AddSpeed)
+                AccelSpeed = AddSpeed;
+
+            for (int i = 0; i < 3; ++i)
+                State.VelocityVector[i] += AccelSpeed * WishDirection[i];
         }
+    }
 
-        for (int i = 0; i < 3; ++i) {
-            this.State.VelocityVector[i] += AccelSpeed * WishDirection[i];
+    public void AirAccelerate(Vector3 WishDirection, float WishSpeed, float Accelerate) {
+        float AddSpeed = WishSpeed - Vector3.Dot(State.VelocityVector, WishDirection);
+
+        if (AddSpeed > 0.0f) {
+            float AccelSpeed = Accelerate * Time.fixedDeltaTime * WishSpeed;
+
+            if (AccelSpeed > AddSpeed)
+                AccelSpeed = AddSpeed;
+
+            for (int i = 0; i < 3; ++i)
+                State.VelocityVector[i] += AccelSpeed * WishDirection[i];
         }
     }
 
     public void CheckVelocity() {
         for (int i = 0; i < 3; ++i) {
-            if (float.IsNaN(this.State.VelocityVector[i])) {
-                Debug.Log("Got a NaN velocity " + this.State.VelocityVector[i]);
-                this.State.VelocityVector[i] = 0;
+            if (float.IsNaN(State.VelocityVector[i])) {
+                Debug.Log("Got a NaN velocity " + State.VelocityVector[i]);
+                State.VelocityVector[i] = 0;
             }
 
-            if (this.State.VelocityVector[i] > this.Settings.MaxVelocity) {
-                this.State.VelocityVector[i] = this.Settings.MaxVelocity;
-            } else if (this.State.VelocityVector[i] < -this.Settings.MaxVelocity) {
-                this.State.VelocityVector[i] = -this.Settings.MaxVelocity;
+            if (State.VelocityVector[i] > Settings.MaxVelocity) {
+                State.VelocityVector[i] = Settings.MaxVelocity;
+            } else if (State.VelocityVector[i] < -Settings.MaxVelocity) {
+                State.VelocityVector[i] = -Settings.MaxVelocity;
             }
         }
     }
 
+    protected Vector3 GetOrigin() {
+        return ScaleOriginReverse(State.CharacterController.center);
+    }
+
+    // source engine to unity conversion
+    protected Vector3 ScaleOrigin(Vector3 origin) {
+        return origin * GameMovementSettings.UnitConversionScale;
+    }
+
+    // unity to source engine conversion
+    protected Vector3 ScaleOriginReverse(Vector3 origin) {
+        return origin / GameMovementSettings.UnitConversionScale;
+    }
+
     public void StartGravity() {
         float Gravity = 1.0f;
-        this.State.VelocityVector.y -= ((this.Settings.Gravity * Gravity) * 0.5f * Time.fixedDeltaTime);
+        State.VelocityVector.y -= ((Settings.Gravity * Gravity) * 0.5f * Time.fixedDeltaTime);// * GameMovementSettings.UnitConversionScale;
 
         CheckVelocity();
     }
 
     public void FinishGravity() {
         float Gravity = 1.0f;
-        this.State.VelocityVector.y -= ((this.Settings.Gravity * Gravity) * 0.5f * Time.fixedDeltaTime);
+        State.VelocityVector.y -= ((Settings.Gravity * Gravity) * 0.5f * Time.fixedDeltaTime);// * GameMovementSettings.UnitConversionScale;
 
         CheckVelocity();
     }
 
     // not the right way to handle gui, but its for debug purposes atm ¯\_(ツ)_/¯
     public void OnGUI() {
-        if (Command.SideMove == 1)
-            GUI.Label(new Rect(Screen.width / 2 + 20, Screen.height / 2 + 40, 400, 100), "D", GUIStyle);
-        if (Command.SideMove == -1)
-            GUI.Label(new Rect(Screen.width / 2 - 20, Screen.height / 2 + 40, 400, 100), "A", GUIStyle);
-        
-        if (Command.ForwardMove == 1)
-            GUI.Label(new Rect(Screen.width / 2, Screen.height / 2 + 20, 400, 100), "W", GUIStyle);
-
-        if (Command.ForwardMove == -1)
-            GUI.Label(new Rect(Screen.width / 2, Screen.height / 2 + 40, 400, 100), "S", GUIStyle);
+        var ups = State.CharacterController.velocity;
+        ups.y = 0;
+        GUI.Label(new Rect(15, 15, 400, 100), "velocity (source units): " + System.Math.Round((ups.magnitude / GameMovementSettings.UnitConversionScale), 0), GUIStyle);
+        GUI.Label(new Rect(15, 30, 400, 100), "onGround: " + State.OnGround, GUIStyle);
+        GUI.Label(new Rect(15, 45, 400, 100), "fmove: " + Command.ForwardMove + ", smove: " + Command.SideMove, GUIStyle);
     }
 }
